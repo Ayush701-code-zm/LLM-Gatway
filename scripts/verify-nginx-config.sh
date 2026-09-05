@@ -17,6 +17,8 @@ echo "✓ config file exists"
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   docker run --rm \
+    --add-host api:127.0.0.1 \
+    --add-host web:127.0.0.1 \
     -v "${CONF}:/etc/nginx/nginx.conf:ro" \
     nginx:1.27-alpine \
     nginx -t -c /etc/nginx/nginx.conf

@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "build": "tsc --project tsconfig.json",
     "type-check": "tsc --noEmit",
     "clean": "rm -rf dist node_modules .turbo"
   },

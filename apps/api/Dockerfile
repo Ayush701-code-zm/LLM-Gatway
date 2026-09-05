@@ -26,6 +26,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 FROM base AS builder
 
 COPY apps/api/pyproject.toml ./apps/api/
+COPY apps/api/smartroute ./apps/api/smartroute
 RUN pip install --upgrade pip && pip install ./apps/api[dev]
 
 

@@ -21,7 +21,10 @@ FROM base AS deps
 
 COPY package.json package-lock.json turbo.json ./
 COPY apps/web/package.json          ./apps/web/
+COPY apps/api-legacy/package.json   ./apps/api-legacy/
 COPY packages/shared/package.json   ./packages/shared/
+COPY packages/database/package.json ./packages/database/
+COPY packages/sdk/package.json      ./packages/sdk/
 
 RUN npm ci --ignore-scripts --include=dev
 
