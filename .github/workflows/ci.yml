@@ -1,0 +1,347 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_call:
+
+# Cancel in-progress runs on the same branch/PR to avoid wasted compute
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  # Minimal env vars required by the test setup (no real secrets needed for unit tests)
+  NODE_ENV:                    test
+  LOG_LEVEL:                   error
+  API_KEY_ENCRYPTION_SECRET:   test-secret-32-chars-padding-xxxx
+  JWT_SECRET:                  test-jwt-secret-for-ci-pipeline
+  JWT_EXPIRES_IN:              15m
+  JWT_REFRESH_EXPIRES_IN:      7d
+  JWT_REFRESH_SECRET:          test-jwt-refresh-secret-for-ci-pipeline
+  DATABASE_URL:                postgresql://smartroute:smartroute@localhost:5432/smartroute_test
+  DIRECT_URL:                  postgresql://smartroute:smartroute@localhost:5432/smartroute_test
+  REDIS_URL:                   redis://localhost:6379
+  API_PORT:                    "3001"
+  API_HOST:                    "0.0.0.0"
+  CORS_ORIGINS:                http://localhost:3000
+  RATE_LIMIT_WINDOW_MS:        "60000"
+  RATE_LIMIT_MAX_REQUESTS:     "100"
+  OLLAMA_BASE_URL:             http://localhost:11434
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # 1. Lint + Format check
+  # ──────────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build shared package (required for linting imports)
+        run: npm run build --workspace=packages/shared
+
+      - name: TypeScript — Web
+        run: npx tsc --noEmit
+        working-directory: apps/web
+
+      - name: Python — API lint
+        run: |
+          cd apps/api
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]" -q
+          .venv/bin/ruff check smartroute || true
+
+      - name: SDK tests
+        run: npm run test --workspace=@smartroute/sdk
+
+      - name: SDK publish smoke
+        run: |
+          chmod +x scripts/sdk-publish-smoke.sh
+          ./scripts/sdk-publish-smoke.sh
+
+      - name: Infra config smoke
+        run: |
+          chmod +x scripts/verify-nginx-config.sh scripts/docker-compose-smoke.sh
+          ./scripts/verify-nginx-config.sh
+          ./scripts/docker-compose-smoke.sh
+
+      - name: Production env preflight (core)
+        run: |
+          chmod +x scripts/verify-production-env.sh
+          ./scripts/verify-production-env.sh --core
+        env:
+          DATABASE_URL:              ${{ env.DATABASE_URL }}
+          REDIS_URL:                 ${{ env.REDIS_URL }}
+          JWT_SECRET:                ${{ env.JWT_SECRET }}
+          JWT_REFRESH_SECRET:        ${{ env.JWT_REFRESH_SECRET }}
+          API_KEY_ENCRYPTION_SECRET: ${{ env.API_KEY_ENCRYPTION_SECRET }}
+          API_BASE_URL:              http://localhost:3001
+          NEXT_PUBLIC_API_URL:       http://localhost:3000
+
+  # ──────────────────────────────────────────────────────────────
+  # 2. Unit + Integration tests (no DB/Redis required)
+  # ──────────────────────────────────────────────────────────────
+  test-unit:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python API + run tests
+        run: |
+          cd apps/api
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]" -q
+          .venv/bin/pytest -q
+        env:
+          JWT_SECRET: test-jwt-secret-for-ci-pipeline-xx
+          JWT_REFRESH_SECRET: test-jwt-refresh-secret-for-ci-xx
+          API_KEY_ENCRYPTION_SECRET: test-secret-32-chars-padding-xxxx
+          DATABASE_URL: postgresql://smartroute:smartroute@localhost:5432/smartroute_test
+          REDIS_URL: redis://localhost:6379
+
+  # ──────────────────────────────────────────────────────────────
+  # 3. Integration tests with real Postgres + Redis
+  # ──────────────────────────────────────────────────────────────
+  test-integration:
+    name: Integration Tests (Postgres + Redis)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER:     smartroute
+          POSTGRES_PASSWORD: smartroute
+          POSTGRES_DB:       smartroute_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U smartroute -d smartroute_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Python API
+        run: |
+          cd apps/api
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]" -q
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=packages/database/prisma/schema.prisma
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+        working-directory: packages/database
+
+      - name: Run Python integration tests
+        run: cd apps/api && .venv/bin/pytest -q tests/
+        env:
+          DATABASE_URL: postgresql://smartroute:smartroute@localhost:5432/smartroute_test
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-jwt-secret-for-ci-pipeline-xx
+          JWT_REFRESH_SECRET: test-jwt-refresh-secret-for-ci-xx
+          API_KEY_ENCRYPTION_SECRET: test-secret-32-chars-padding-xxxx
+
+  # ──────────────────────────────────────────────────────────────
+  # 4. Docker build validation (no push — just verify it compiles)
+  # ──────────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker Build Check
+    runs-on: ubuntu-latest
+    # Only run on pushes to main/develop, not every PR (expensive)
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build API image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          tags: smartroute-api:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Build Web image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          tags: smartroute-web:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost:3001
+
+  # ──────────────────────────────────────────────────────────────
+  # 5. E2E smoke tests (Playwright)
+  # ──────────────────────────────────────────────────────────────
+  test-e2e:
+    name: E2E Tests (Playwright)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER:     smartroute
+          POSTGRES_PASSWORD: smartroute
+          POSTGRES_DB:       smartroute_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U smartroute -d smartroute_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        command: redis-server --maxmemory-policy noeviction
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://smartroute:smartroute@localhost:5432/smartroute_test
+      DIRECT_URL:   postgresql://smartroute:smartroute@localhost:5432/smartroute_test
+      REDIS_URL:    redis://localhost:6379
+      JWT_REFRESH_SECRET: test-jwt-refresh-secret-for-ci-pipeline
+      E2E_BASE_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      SAML_E2E_BYPASS: 'true'
+      OAUTH_E2E_BYPASS: 'true'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Python API
+        run: |
+          cd apps/api
+          python3 -m venv .venv
+          .venv/bin/pip install -e ".[dev]" -q
+
+      - name: Build shared package
+        run: npm run build --workspace=packages/shared
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema=packages/database/prisma/schema.prisma
+
+      - name: Apply migrations and seed
+        working-directory: packages/database
+        run: |
+          npx prisma migrate deploy
+          npx tsx prisma/seed.ts || true
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Start FastAPI server
+        run: |
+          cd apps/api && .venv/bin/uvicorn smartroute.main:app --host 0.0.0.0 --port 3001 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3001/health/live && break
+            sleep 2
+          done
+
+      - name: Start web server
+        run: |
+          npm run dev --workspace=@smartroute/web &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:3000/login && break
+            sleep 2
+          done
+
+      - name: Run Playwright E2E tests
+        run: npx playwright test e2e/
+
+      - name: Gateway extended smoke
+        run: |
+          chmod +x scripts/test-gateway-ci.sh
+          API_URL=http://localhost:3001 ./scripts/test-gateway-ci.sh
+
+      - name: Infra config smoke
+        run: |
+          chmod +x scripts/verify-nginx-config.sh scripts/docker-compose-smoke.sh
+          ./scripts/verify-nginx-config.sh
+          ./scripts/docker-compose-smoke.sh
+
+  # ──────────────────────────────────────────────────────────────
+  # 6. Security audit
+  # ──────────────────────────────────────────────────────────────
+  security:
+    name: Dependency Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: npm audit (high + critical only)
+        run: npm audit --audit-level=high
+        continue-on-error: true  # Treat as advisory; update deps in a separate PR

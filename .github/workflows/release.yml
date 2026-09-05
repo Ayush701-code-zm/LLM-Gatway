@@ -1,0 +1,189 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']  # triggers on v1.2.3, v2.0.0-rc.1, etc.
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY:   ghcr.io
+  API_IMAGE:  ghcr.io/${{ github.repository_owner }}/smartroute-api
+  WEB_IMAGE:  ghcr.io/${{ github.repository_owner }}/smartroute-web
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # Run full test suite before any publish
+  # ──────────────────────────────────────────────────────────────
+  test:
+    name: Pre-release Tests
+    uses: ./.github/workflows/ci.yml
+
+  # ──────────────────────────────────────────────────────────────
+  # SDK + release metadata checks
+  # ──────────────────────────────────────────────────────────────
+  preflight:
+    name: Release Preflight
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Release preflight (tag ↔ SDK version)
+        env:
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          DATABASE_URL: postgresql://smartroute:smartroute@localhost:5432/smartroute
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test-jwt-secret-for-ci-pipeline
+          JWT_REFRESH_SECRET: test-jwt-refresh-secret-for-ci-pipeline
+          API_KEY_ENCRYPTION_SECRET: test-secret-32-chars-padding-xxxx
+          API_BASE_URL: http://localhost:3001
+          NEXT_PUBLIC_API_URL: http://localhost:3000
+        run: |
+          chmod +x scripts/release-preflight.sh scripts/sdk-publish-smoke.sh scripts/verify-production-env.sh
+          ./scripts/release-preflight.sh "${{ github.ref_name }}"
+
+  # ──────────────────────────────────────────────────────────────
+  # Build + push images to GitHub Container Registry
+  # ──────────────────────────────────────────────────────────────
+  publish:
+    name: Publish Docker Images
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract semver metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.API_IMAGE }}
+            ${{ env.WEB_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+
+      - name: Build + push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file:    apps/api/Dockerfile
+          push:    true
+          tags:    ${{ env.API_IMAGE }}:${{ github.ref_name }},${{ env.API_IMAGE }}:latest
+          labels:  ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+
+      - name: Build + push Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file:    apps/web/Dockerfile
+          push:    true
+          tags:    ${{ env.WEB_IMAGE }}:${{ github.ref_name }},${{ env.WEB_IMAGE }}:latest
+          labels:  ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to:   type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## Docker Images
+
+            ```bash
+            # API
+            docker pull ${{ env.API_IMAGE }}:${{ github.ref_name }}
+
+            # Web dashboard
+            docker pull ${{ env.WEB_IMAGE }}:${{ github.ref_name }}
+            ```
+
+            ## Quick Deploy
+
+            ```bash
+            TAG=${{ github.ref_name }} docker compose up -d
+            ```
+
+            ## Post-release checklist
+
+            - [ ] Run production cutover smoke: `docs/PRODUCTION_CUTOVER.md`
+            - [ ] Verify `@smartroute/sdk@${{ github.ref_name }}` on npm (if published)
+            - [ ] Monitor error rates for 15 minutes after deploy
+
+            See [docs/RELEASE.md](./docs/RELEASE.md) and [docs/NPM_PUBLISH.md](./docs/NPM_PUBLISH.md).
+
+  publish-sdk:
+    name: Publish @smartroute/sdk to npm
+    needs: [preflight]
+    if: ${{ secrets.NPM_TOKEN != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # npm provenance
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify tag matches package version
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          PKG="$(node -p "require('./packages/sdk/package.json').version")"
+          test "$PKG" = "$VERSION"
+
+      - name: Build SDK
+        run: npm run build --workspace=@smartroute/sdk
+
+      - name: Run SDK tests
+        run: npm run test --workspace=@smartroute/sdk
+
+      - name: Publish to npm
+        run: npm publish --workspace=@smartroute/sdk --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-sdk-skipped:
+    name: SDK Publish Skipped (no NPM_TOKEN)
+    needs: [preflight]
+    if: ${{ secrets.NPM_TOKEN == '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "NPM_TOKEN secret not configured — skipping npm publish. See docs/NPM_PUBLISH.md"

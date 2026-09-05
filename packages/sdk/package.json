@@ -1,0 +1,36 @@
+{
+  "name": "@smartroute/sdk",
+  "version": "0.1.2",
+  "description": "Official TypeScript SDK for SmartRoute AI — AI Gateway & Cost Optimization Platform",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm run test",
+    "clean": "rm -rf dist node_modules .turbo"
+  },
+  "keywords": ["llm", "gateway", "ai", "openai", "anthropic", "routing", "smartroute"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/smartroute-ai.git",
+    "directory": "packages/sdk"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.9"
+  },
+  "license": "MIT"
+}

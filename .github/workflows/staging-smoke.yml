@@ -1,0 +1,47 @@
+name: Staging Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      staging_api_url:
+        description: 'Staging API base URL (overrides STAGING_API_URL secret)'
+        required: false
+        type: string
+
+# Optional job — requires repo secrets. Skips gracefully when not configured.
+jobs:
+  stripe-staging:
+    name: Stripe Staging Smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check staging configuration
+        id: config
+        run: |
+          URL="${{ inputs.staging_api_url || secrets.STAGING_API_URL }}"
+          if [[ -z "$URL" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "STAGING_API_URL not set — skipping staging smoke."
+            exit 0
+          fi
+          if [[ -z "${{ secrets.STRIPE_SECRET_KEY }}" ]]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "STRIPE_SECRET_KEY not set — skipping staging smoke."
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Stripe staging smoke
+        if: steps.config.outputs.configured == 'true'
+        env:
+          STAGING_API_URL:          ${{ inputs.staging_api_url || secrets.STAGING_API_URL }}
+          STRIPE_SECRET_KEY:        ${{ secrets.STRIPE_SECRET_KEY }}
+          STRIPE_WEBHOOK_SECRET:    ${{ secrets.STRIPE_WEBHOOK_SECRET }}
+          STRIPE_PRICE_PRO:         ${{ secrets.STRIPE_PRICE_PRO }}
+          STRIPE_PRICE_ENTERPRISE:  ${{ secrets.STRIPE_PRICE_ENTERPRISE }}
+          API_BASE_URL:             ${{ inputs.staging_api_url || secrets.STAGING_API_URL }}
+        run: |
+          chmod +x scripts/stripe-staging-smoke.sh scripts/verify-stripe-env.sh
+          ./scripts/stripe-staging-smoke.sh

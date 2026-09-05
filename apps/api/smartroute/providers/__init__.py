@@ -1,0 +1,1 @@
+from smartroute.providers.registry import provider_registry

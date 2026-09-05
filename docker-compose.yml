@@ -1,0 +1,178 @@
+version: '3.9'
+
+# ===========================================================
+# SmartRoute AI — Production Docker Compose
+# ===========================================================
+
+x-common: &common
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: '10m'
+      max-file: '3'
+
+services:
+  # ─────────────────────────────────────────────────────────
+  # PostgreSQL (Supabase-compatible)
+  # ─────────────────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    <<: *common
+    environment:
+      POSTGRES_USER: smartroute
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-smartroute_dev_password}
+      POSTGRES_DB: smartroute
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U smartroute -d smartroute']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ─────────────────────────────────────────────────────────
+  # Redis
+  # ─────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.4-alpine
+    <<: *common
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        ARGS="redis-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy noeviction"
+        if [ -n "$${REDIS_PASSWORD}" ]; then
+          ARGS="$$ARGS --requirepass $$REDIS_PASSWORD"
+        fi
+        exec $$ARGS
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    volumes:
+      - redis_data:/data
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          if [ -n "$$REDIS_PASSWORD" ]; then redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────
+  # API (FastAPI Backend)
+  # ─────────────────────────────────────────────────────────
+  api:
+    profiles: ['full']
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: release
+    <<: *common
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://smartroute:${POSTGRES_PASSWORD:-smartroute_dev_password}@postgres:5432/smartroute?schema=public
+      DIRECT_URL: postgresql://smartroute:${POSTGRES_PASSWORD:-smartroute_dev_password}@postgres:5432/smartroute?schema=public
+      REDIS_URL: redis://:${REDIS_PASSWORD:-}@redis:6379
+    ports:
+      - '3001:3001'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '-sf', 'http://localhost:3001/health/live']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────
+  # Web (Next.js Frontend)
+  # ─────────────────────────────────────────────────────────
+  web:
+    profiles: ['full']
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      target: production
+    <<: *common
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+    ports:
+      - '3000:3000'
+    depends_on:
+      - api
+
+  # ─────────────────────────────────────────────────────────
+  # Prometheus
+  # ─────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    <<: *common
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+      - --web.enable-lifecycle
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - '9090:9090'
+
+  # ─────────────────────────────────────────────────────────
+  # Grafana
+  # ─────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.4.0
+    <<: *common
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_SERVER_ROOT_URL: http://localhost:3002
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - '3002:3000'
+    depends_on:
+      - prometheus
+
+  # ─────────────────────────────────────────────────────────
+  # Nginx (Reverse Proxy)
+  # ─────────────────────────────────────────────────────────
+  nginx:
+    profiles: ['full']
+    image: nginx:1.27-alpine
+    <<: *common
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - '80:80'
+    depends_on:
+      - api
+      - web
+
+volumes:
+  postgres_data:
+  redis_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: smartroute-network
+    driver: bridge

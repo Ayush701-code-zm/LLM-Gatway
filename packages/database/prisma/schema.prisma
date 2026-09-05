@@ -1,0 +1,905 @@
+// ===========================================================
+// SmartRoute AI — Prisma Schema
+// Production-grade database schema for the AI Gateway platform
+// ===========================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  directUrl  = env("DIRECT_URL")
+  extensions = [pgcrypto, vector]
+}
+
+// ===========================================================
+// ENUMS
+// ===========================================================
+
+enum UserRole {
+  SUPER_ADMIN
+  USER
+}
+
+enum WorkspaceMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+enum PlanTier {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+enum RequestStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CACHED
+  RATE_LIMITED
+  BUDGET_EXCEEDED
+}
+
+enum ComplexityLevel {
+  SIMPLE
+  MEDIUM
+  COMPLEX
+}
+
+enum ProviderName {
+  OPENAI
+  ANTHROPIC
+  GOOGLE
+  OLLAMA
+  COHERE
+  MISTRAL
+}
+
+enum QualityTier {
+  ECONOMY
+  STANDARD
+  PREMIUM
+}
+
+enum AvailabilityStatus {
+  AVAILABLE
+  DEGRADED
+  UNAVAILABLE
+  UNKNOWN
+}
+
+enum CircuitBreakerState {
+  CLOSED
+  OPEN
+  HALF_OPEN
+}
+
+enum BudgetPeriod {
+  DAILY
+  WEEKLY
+  MONTHLY
+  YEARLY
+  TOTAL
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AlertStatus {
+  PENDING
+  SENT
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+enum NotificationType {
+  BUDGET_WARNING
+  BUDGET_CRITICAL
+  BUDGET_EXCEEDED
+  PROVIDER_DOWN
+  PROVIDER_DEGRADED
+  PROVIDER_RECOVERED
+  CIRCUIT_BREAKER_OPEN
+  CIRCUIT_BREAKER_CLOSED
+  RATE_LIMIT_EXCEEDED
+  API_KEY_EXPIRING
+  ANOMALY_DETECTED
+  WORKSPACE_SLUG_CHANGED
+}
+
+enum LoadBalancingStrategy {
+  PRIORITY_BASED
+  COST_OPTIMIZED
+  LATENCY_OPTIMIZED
+  ROUND_ROBIN
+  WEIGHTED_RANDOM
+}
+
+enum AuditAction {
+  USER_LOGIN
+  USER_LOGOUT
+  USER_CREATED
+  USER_UPDATED
+  API_KEY_CREATED
+  API_KEY_REVOKED
+  API_KEY_ROTATED
+  WORKSPACE_CREATED
+  WORKSPACE_UPDATED
+  WORKSPACE_DELETED
+  MEMBER_ADDED
+  MEMBER_REMOVED
+  MEMBER_ROLE_CHANGED
+  BUDGET_CREATED
+  BUDGET_UPDATED
+  BUDGET_ALERT_SENT
+  PROVIDER_ENABLED
+  PROVIDER_DISABLED
+  ROUTING_CONFIG_CHANGED
+  SETTINGS_UPDATED
+  WEBHOOK_CREATED
+  WEBHOOK_UPDATED
+  WEBHOOK_DELETED
+}
+
+enum WebhookStatus {
+  ACTIVE
+  INACTIVE
+  FAILED   // auto-disabled after too many consecutive failures
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+  RETRYING
+}
+
+// ===========================================================
+// USERS & WORKSPACES
+// ===========================================================
+
+model User {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email           String    @unique
+  hashedPassword  String    @map("hashed_password")
+  name            String
+  avatarUrl       String?   @map("avatar_url")
+  role            UserRole  @default(USER)
+  emailVerified   Boolean   @default(false) @map("email_verified")
+  emailVerificationTokenHash String?   @map("email_verification_token_hash")
+  emailVerificationExpiresAt DateTime? @map("email_verification_expires_at")
+  passwordResetTokenHash   String?   @map("password_reset_token_hash")
+  passwordResetExpiresAt   DateTime? @map("password_reset_expires_at")
+  mfaEnabled               Boolean   @default(false) @map("mfa_enabled")
+  mfaSecretEncrypted       String?   @map("mfa_secret_encrypted")
+  mfaBackupCodesHash       Json?     @map("mfa_backup_codes_hash")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  deletedAt       DateTime? @map("deleted_at")
+
+  refreshTokens     RefreshToken[]
+  workspaceMemberships WorkspaceMember[]
+  apiKeys           ApiKey[]
+  auditLogs         AuditLog[]
+  notifications     Notification[]
+
+  @@index([email])
+  @@index([createdAt])
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  token     String   @unique
+  userId    String   @map("user_id") @db.Uuid
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  revokedAt DateTime? @map("revoked_at")
+  userAgent String?  @map("user_agent")
+  ipAddress String?  @map("ip_address")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("refresh_tokens")
+}
+
+model Workspace {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  slug        String    @unique
+  name        String
+  description String?
+  logoUrl     String?   @map("logo_url")
+  plan              PlanTier  @default(FREE)
+  stripeCustomerId  String?   @unique @map("stripe_customer_id")
+  isActive          Boolean   @default(true) @map("is_active")
+
+  // Routing configuration
+  defaultRoutingStrategy LoadBalancingStrategy @default(COST_OPTIMIZED) @map("default_routing_strategy")
+  allowedProviders       ProviderName[]        @map("allowed_providers")
+
+  // Cache settings
+  semanticCacheEnabled   Boolean @default(true) @map("semantic_cache_enabled")
+  cacheThreshold         Float   @default(0.92) @map("cache_threshold")
+
+  // Rate limit overrides (null = use plan defaults)
+  requestsPerMinute      Int?    @map("requests_per_minute")
+  tokensPerMinute        Int?    @map("tokens_per_minute")
+  requestsPerDay         Int?    @map("requests_per_day")
+
+  // Enterprise SSO (SAML stub — configuration only until full IdP flow ships)
+  ssoEnabled     Boolean @default(false) @map("sso_enabled")
+  ssoMetadataUrl String? @map("sso_metadata_url")
+  ssoEntityId    String? @map("sso_entity_id")
+  ssoIdpSsoUrl   String? @map("sso_idp_sso_url")
+  ssoIdpCertPem  String? @map("sso_idp_cert_pem") @db.Text
+
+  // Enterprise SCIM provisioning
+  scimEnabled     Boolean @default(false) @map("scim_enabled")
+  scimTokenHash   String? @unique @map("scim_token_hash")
+  scimTokenPrefix String? @map("scim_token_prefix")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  members          WorkspaceMember[]
+  apiKeys          ApiKey[]
+  requests         Request[]
+  budgets          Budget[]
+  budgetAlerts     BudgetAlert[]
+  spendingAnalytics SpendingAnalytic[]
+  rateLimits       RateLimit[]
+  usageMetrics     UsageMetric[]
+  notifications    Notification[]
+  auditLogs        AuditLog[]
+  webhooks         Webhook[]
+
+  @@index([slug])
+  @@index([plan])
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String              @map("workspace_id") @db.Uuid
+  userId      String              @map("user_id") @db.Uuid
+  role        WorkspaceMemberRole @default(MEMBER)
+  invitedBy   String?             @map("invited_by") @db.Uuid
+  joinedAt    DateTime            @default(now()) @map("joined_at")
+  createdAt   DateTime            @default(now()) @map("created_at")
+  updatedAt   DateTime            @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([workspaceId])
+  @@index([userId])
+  @@map("workspace_members")
+}
+
+// ===========================================================
+// API KEYS
+// ===========================================================
+
+model ApiKey {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String       @map("workspace_id") @db.Uuid
+  createdById String       @map("created_by_id") @db.Uuid
+  name        String
+  keyHash     String       @unique @map("key_hash")
+  keyPrefix   String       @map("key_prefix")
+  status      ApiKeyStatus @default(ACTIVE)
+  expiresAt   DateTime?    @map("expires_at")
+  lastUsedAt  DateTime?    @map("last_used_at")
+  lastUsedIp  String?      @map("last_used_ip")
+  requestCount BigInt      @default(0) @map("request_count")
+
+  // Scopes/permissions
+  scopes      String[]     @default(["chat:write", "analytics:read"])
+
+  // Per-key rate limit overrides
+  rateLimitRpm Int?        @map("rate_limit_rpm")
+  rateLimitTpm Int?        @map("rate_limit_tpm")
+
+  revokedAt   DateTime?    @map("revoked_at")
+  revokedBy   String?      @map("revoked_by") @db.Uuid
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User      @relation(fields: [createdById], references: [id])
+  requests  Request[]
+
+  @@index([workspaceId])
+  @@index([keyHash])
+  @@index([status])
+  @@map("api_keys")
+}
+
+// ===========================================================
+// MODEL REGISTRY
+// ===========================================================
+
+model ModelRegistry {
+  id                 String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider           ProviderName
+  modelId            String             @map("model_id")
+  displayName        String             @map("display_name")
+  description        String?
+
+  // Pricing (per 1M tokens in USD)
+  inputCostPerMillion  Float            @map("input_cost_per_million")
+  outputCostPerMillion Float            @map("output_cost_per_million")
+
+  // Capabilities
+  contextWindow      Int                @map("context_window")
+  maxOutputTokens    Int                @map("max_output_tokens")
+  supportsStreaming   Boolean           @default(true) @map("supports_streaming")
+  supportsVision      Boolean           @default(false) @map("supports_vision")
+  supportsFunctions   Boolean           @default(false) @map("supports_functions")
+  supportsEmbeddings  Boolean           @default(false) @map("supports_embeddings")
+
+  // Routing metadata
+  qualityTier        QualityTier        @map("quality_tier")
+  complexityMinLevel ComplexityLevel    @map("complexity_min_level")
+  availabilityStatus AvailabilityStatus @default(AVAILABLE) @map("availability_status")
+
+  // Live performance stats (rolling averages updated by background job)
+  avgLatencyMs       Float?             @map("avg_latency_ms")
+  p95LatencyMs       Float?             @map("p95_latency_ms")
+  successRate        Float?             @map("success_rate")
+
+  isEnabled          Boolean            @default(true) @map("is_enabled")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+
+  requests         Request[]
+  routingDecisions RoutingDecision[]
+  providerLogs     ProviderLog[]
+  providerHealth   ProviderHealth[]
+
+  @@unique([provider, modelId])
+  @@index([provider])
+  @@index([qualityTier])
+  @@index([availabilityStatus])
+  @@map("model_registry")
+}
+
+// ===========================================================
+// REQUESTS (Core request lifecycle)
+// ===========================================================
+
+model Request {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  traceId       String        @map("trace_id") @db.Uuid
+  workspaceId   String        @map("workspace_id") @db.Uuid
+  apiKeyId      String        @map("api_key_id") @db.Uuid
+  modelRegistryId String?     @map("model_registry_id") @db.Uuid
+  status        RequestStatus @default(PENDING)
+
+  // Request content
+  prompt        String
+  systemPrompt  String?       @map("system_prompt")
+  requestedModel String?      @map("requested_model")
+
+  // Response content
+  response      String?
+  finishReason  String?       @map("finish_reason")
+
+  // Token counts
+  inputTokens   Int?          @map("input_tokens")
+  outputTokens  Int?          @map("output_tokens")
+  totalTokens   Int?          @map("total_tokens")
+
+  // Cost tracking
+  actualCostUsd        Float?  @map("actual_cost_usd")
+  baselineCostUsd      Float?  @map("baseline_cost_usd")
+  savingsUsd           Float?  @map("savings_usd")
+
+  // Performance
+  totalLatencyMs       Int?    @map("total_latency_ms")
+  providerLatencyMs    Int?    @map("provider_latency_ms")
+  cacheLatencyMs       Int?    @map("cache_latency_ms")
+
+  // Cache
+  cacheHit             Boolean @default(false) @map("cache_hit")
+  cacheEntryId         String? @map("cache_entry_id") @db.Uuid
+  cacheSimilarityScore Float?  @map("cache_similarity_score")
+
+  // Routing
+  complexityLevel      ComplexityLevel? @map("complexity_level")
+  retryCount           Int              @default(0) @map("retry_count")
+  fallbackUsed         Boolean          @default(false) @map("fallback_used")
+  streamingEnabled     Boolean          @default(false) @map("streaming_enabled")
+
+  // Client metadata
+  clientIp             String?          @map("client_ip")
+  userAgent            String?          @map("user_agent")
+
+  errorCode            String?          @map("error_code")
+  errorMessage         String?          @map("error_message")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  workspace       Workspace        @relation(fields: [workspaceId], references: [id])
+  apiKey          ApiKey           @relation(fields: [apiKeyId], references: [id])
+  model           ModelRegistry?   @relation(fields: [modelRegistryId], references: [id])
+  providerLogs    ProviderLog[]
+  routingDecision RoutingDecision?
+  fallbackEvents  FallbackEvent[]
+  cacheEntry      CacheEntry?      @relation(fields: [cacheEntryId], references: [id])
+
+  @@index([workspaceId, createdAt])
+  @@index([apiKeyId])
+  @@index([traceId])
+  @@index([status])
+  @@index([cacheHit])
+  @@index([createdAt])
+  @@map("requests")
+}
+
+// ===========================================================
+// PROVIDER LOGS
+// ===========================================================
+
+model ProviderLog {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestId       String       @map("request_id") @db.Uuid
+  modelRegistryId String       @map("model_registry_id") @db.Uuid
+  attemptNumber   Int          @default(1) @map("attempt_number")
+
+  statusCode      Int?         @map("status_code")
+  success         Boolean
+  errorCode       String?      @map("error_code")
+  errorMessage    String?      @map("error_message")
+
+  inputTokens     Int?         @map("input_tokens")
+  outputTokens    Int?         @map("output_tokens")
+  costUsd         Float?       @map("cost_usd")
+  latencyMs       Int?         @map("latency_ms")
+  ttfbMs          Int?         @map("ttfb_ms")
+
+  rawRequest      Json?        @map("raw_request")
+  rawResponse     Json?        @map("raw_response")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  request Request       @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  model   ModelRegistry @relation(fields: [modelRegistryId], references: [id])
+
+  @@index([requestId])
+  @@index([modelRegistryId])
+  @@index([success])
+  @@index([createdAt])
+  @@map("provider_logs")
+}
+
+// ===========================================================
+// ROUTING DECISIONS
+// ===========================================================
+
+model RoutingDecision {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestId       String          @unique @map("request_id") @db.Uuid
+  modelRegistryId String          @map("model_registry_id") @db.Uuid
+
+  strategy        LoadBalancingStrategy @map("strategy")
+  complexityLevel ComplexityLevel @map("complexity_level")
+  complexityScore Float           @map("complexity_score")
+
+  // Candidate models considered
+  candidateModels Json            @map("candidate_models")
+
+  // Why this model was chosen
+  selectionReason String          @map("selection_reason")
+  estimatedCostUsd Float          @map("estimated_cost_usd")
+
+  decisionLatencyMs Int           @map("decision_latency_ms")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  request Request       @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  model   ModelRegistry @relation(fields: [modelRegistryId], references: [id])
+
+  @@index([modelRegistryId])
+  @@index([strategy])
+  @@index([complexityLevel])
+  @@index([createdAt])
+  @@map("routing_decisions")
+}
+
+// ===========================================================
+// SEMANTIC CACHE
+// ===========================================================
+
+model CacheEntry {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId     String?  @map("workspace_id") @db.Uuid
+  promptHash      String   @map("prompt_hash")
+  prompt          String
+  response        String
+  modelId         String   @map("model_id")
+  provider        ProviderName
+
+  inputTokens     Int      @map("input_tokens")
+  outputTokens    Int      @map("output_tokens")
+  costUsd         Float    @map("cost_usd")
+
+  // pgvector embedding — stored as a typed field
+  embedding       Unsupported("vector(1536)")?
+
+  hitCount        Int      @default(0) @map("hit_count")
+  totalSavingsUsd Float    @default(0) @map("total_savings_usd")
+
+  expiresAt       DateTime? @map("expires_at")
+  lastHitAt       DateTime? @map("last_hit_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  requests Request[]
+
+  @@index([workspaceId])
+  @@index([promptHash])
+  @@index([expiresAt])
+  @@map("cache_entries")
+}
+
+// ===========================================================
+// BUDGETS
+// ===========================================================
+
+model Budget {
+  id            String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId   String       @map("workspace_id") @db.Uuid
+  name          String
+  limitUsd      Float        @map("limit_usd")
+  period        BudgetPeriod
+  currentSpend  Float        @default(0) @map("current_spend")
+  periodStartAt DateTime     @map("period_start_at")
+  periodEndAt   DateTime     @map("period_end_at")
+  isActive      Boolean      @default(true) @map("is_active")
+  autoRenew     Boolean      @default(true) @map("auto_renew")
+
+  // Alert thresholds (percentage 0–100)
+  alertAt80     Boolean      @default(true) @map("alert_at_80")
+  alertAt90     Boolean      @default(true) @map("alert_at_90")
+  blockAt100    Boolean      @default(true) @map("block_at_100")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  workspace    Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  budgetAlerts BudgetAlert[]
+
+  @@index([workspaceId])
+  @@index([period])
+  @@index([isActive])
+  @@map("budgets")
+}
+
+model BudgetAlert {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String        @map("workspace_id") @db.Uuid
+  budgetId    String        @map("budget_id") @db.Uuid
+  severity    AlertSeverity
+  status      AlertStatus   @default(PENDING)
+  threshold   Float
+  spendAtAlert Float        @map("spend_at_alert")
+  message     String
+  sentAt      DateTime?     @map("sent_at")
+  resolvedAt  DateTime?     @map("resolved_at")
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  budget    Budget    @relation(fields: [budgetId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([budgetId])
+  @@index([status])
+  @@map("budget_alerts")
+}
+
+// ===========================================================
+// SPENDING ANALYTICS (Pre-aggregated for dashboard)
+// ===========================================================
+
+model SpendingAnalytic {
+  id                   String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId          String       @map("workspace_id") @db.Uuid
+  date                 DateTime     @db.Date
+  provider             ProviderName?
+
+  totalRequests        Int          @default(0) @map("total_requests")
+  successfulRequests   Int          @default(0) @map("successful_requests")
+  failedRequests       Int          @default(0) @map("failed_requests")
+  cachedRequests       Int          @default(0) @map("cached_requests")
+
+  totalInputTokens     BigInt       @default(0) @map("total_input_tokens")
+  totalOutputTokens    BigInt       @default(0) @map("total_output_tokens")
+
+  actualCostUsd        Float        @default(0) @map("actual_cost_usd")
+  baselineCostUsd      Float        @default(0) @map("baseline_cost_usd")
+  totalSavingsUsd      Float        @default(0) @map("total_savings_usd")
+  cacheSavingsUsd      Float        @default(0) @map("cache_savings_usd")
+  routingSavingsUsd    Float        @default(0) @map("routing_savings_usd")
+
+  avgLatencyMs         Float?       @map("avg_latency_ms")
+  p50LatencyMs         Float?       @map("p50_latency_ms")
+  p95LatencyMs         Float?       @map("p95_latency_ms")
+  p99LatencyMs         Float?       @map("p99_latency_ms")
+
+  cacheHitRate         Float?       @map("cache_hit_rate")
+  retryRate            Float?       @map("retry_rate")
+  fallbackRate         Float?       @map("fallback_rate")
+  errorRate            Float?       @map("error_rate")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, date, provider])
+  @@index([workspaceId, date])
+  @@index([date])
+  @@map("spending_analytics")
+}
+
+// ===========================================================
+// RATE LIMITS
+// ===========================================================
+
+model RateLimit {
+  id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId       String    @map("workspace_id") @db.Uuid
+  plan              PlanTier
+  requestsPerMinute Int       @map("requests_per_minute")
+  requestsPerHour   Int       @map("requests_per_hour")
+  requestsPerDay    Int       @map("requests_per_day")
+  tokensPerMinute   Int       @map("tokens_per_minute")
+  tokensPerDay      BigInt    @map("tokens_per_day")
+  isActive          Boolean   @default(true) @map("is_active")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId])
+  @@index([workspaceId])
+  @@map("rate_limits")
+}
+
+// ===========================================================
+// FALLBACK EVENTS
+// ===========================================================
+
+model FallbackEvent {
+  id                  String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestId           String       @map("request_id") @db.Uuid
+  failedProvider      ProviderName @map("failed_provider")
+  failedModelId       String       @map("failed_model_id")
+  fallbackProvider    ProviderName @map("fallback_provider")
+  fallbackModelId     String       @map("fallback_model_id")
+  failureReason       String       @map("failure_reason")
+  failureStatusCode   Int?         @map("failure_status_code")
+  fallbackLatencyMs   Int?         @map("fallback_latency_ms")
+  success             Boolean
+  createdAt           DateTime     @default(now()) @map("created_at")
+
+  request Request @relation(fields: [requestId], references: [id], onDelete: Cascade)
+
+  @@index([requestId])
+  @@index([failedProvider])
+  @@index([fallbackProvider])
+  @@index([createdAt])
+  @@map("fallback_events")
+}
+
+// ===========================================================
+// PROVIDER HEALTH
+// ===========================================================
+
+model ProviderHealth {
+  id              String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  modelRegistryId String             @map("model_registry_id") @db.Uuid
+  status          AvailabilityStatus
+  latencyMs       Int?               @map("latency_ms")
+  statusCode      Int?               @map("status_code")
+  errorMessage    String?            @map("error_message")
+  checkedAt       DateTime           @default(now()) @map("checked_at")
+
+  model ModelRegistry @relation(fields: [modelRegistryId], references: [id])
+
+  @@index([modelRegistryId, checkedAt])
+  @@index([status])
+  @@index([checkedAt])
+  @@map("provider_health")
+}
+
+// ===========================================================
+// CIRCUIT BREAKER EVENTS
+// ===========================================================
+
+model CircuitBreakerEvent {
+  id              String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  provider        ProviderName
+  modelId         String              @map("model_id")
+  fromState       CircuitBreakerState @map("from_state")
+  toState         CircuitBreakerState @map("to_state")
+  reason          String
+  failureCount    Int                 @map("failure_count")
+  successCount    Int                 @default(0) @map("success_count")
+  resolvedAt      DateTime?           @map("resolved_at")
+  createdAt       DateTime            @default(now()) @map("created_at")
+
+  @@index([provider])
+  @@index([toState])
+  @@index([createdAt])
+  @@map("circuit_breaker_events")
+}
+
+// ===========================================================
+// USAGE METRICS (Prometheus-style time-series for dashboards)
+// ===========================================================
+
+model UsageMetric {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String?      @map("workspace_id") @db.Uuid
+  metricName  String       @map("metric_name")
+  metricValue Float        @map("metric_value")
+  labels      Json?
+  recordedAt  DateTime     @default(now()) @map("recorded_at")
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, metricName, recordedAt])
+  @@index([metricName, recordedAt])
+  @@index([recordedAt])
+  @@map("usage_metrics")
+}
+
+// ===========================================================
+// AUDIT LOGS
+// ===========================================================
+
+model AuditLog {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String?     @map("workspace_id") @db.Uuid
+  userId      String?     @map("user_id") @db.Uuid
+  action      AuditAction
+  resourceType String?    @map("resource_type")
+  resourceId  String?     @map("resource_id")
+  metadata    Json?
+  ipAddress   String?     @map("ip_address")
+  userAgent   String?     @map("user_agent")
+  createdAt   DateTime    @default(now()) @map("created_at")
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  user      User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([userId, createdAt])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ===========================================================
+// NOTIFICATIONS
+// ===========================================================
+
+model Notification {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId String?          @map("workspace_id") @db.Uuid
+  userId      String?          @map("user_id") @db.Uuid
+  type        NotificationType
+  title       String
+  body        String
+  metadata    Json?
+  readAt      DateTime?        @map("read_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  workspace Workspace? @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([userId, readAt])
+  @@index([type])
+  @@map("notifications")
+}
+
+// ===========================================================
+// HEALTH CHECKS (Infrastructure-level)
+// ===========================================================
+
+model HealthCheck {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  service       String
+  status        String
+  latencyMs     Int?     @map("latency_ms")
+  details       Json?
+  checkedAt     DateTime @default(now()) @map("checked_at")
+
+  @@index([service, checkedAt])
+  @@index([checkedAt])
+  @@map("health_checks")
+}
+
+// ===========================================================
+// WEBHOOKS
+// Workspace-configured HTTP callbacks delivered on platform events
+// (budget alerts, provider status changes, etc.)
+// Secured with HMAC-SHA256 signatures on every delivery.
+// ===========================================================
+
+model Webhook {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  workspaceId    String        @map("workspace_id") @db.Uuid
+  name           String
+  url            String
+  /** HMAC-SHA256 signing secret — stored encrypted in the DB */
+  signingSecret  String        @map("signing_secret")
+  /** Which event types trigger this webhook (empty = all events) */
+  events         String[]      @default([])
+  status         WebhookStatus @default(ACTIVE)
+  /** Number of consecutive delivery failures */
+  failureCount   Int           @default(0) @map("failure_count")
+  lastTriggeredAt DateTime?    @map("last_triggered_at")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+
+  workspace  Workspace         @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  deliveries WebhookDelivery[]
+
+  @@index([workspaceId, status])
+  @@index([status])
+  @@map("webhooks")
+}
+
+model WebhookDelivery {
+  id              String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  webhookId       String               @map("webhook_id") @db.Uuid
+  workspaceId     String               @map("workspace_id") @db.Uuid
+  /** The event type that triggered this delivery */
+  event           String
+  /** Full request payload that was sent */
+  payload         Json
+  /** HTTP status code from the receiving server (null if request failed) */
+  responseStatus  Int?                 @map("response_status")
+  /** First 500 chars of the response body for debugging */
+  responseBody    String?              @map("response_body")
+  status          WebhookDeliveryStatus @default(PENDING)
+  /** How many times this delivery has been attempted */
+  attempts        Int                  @default(0)
+  /** Next retry time (null when not pending retry) */
+  nextRetryAt     DateTime?            @map("next_retry_at")
+  latencyMs       Int?                 @map("latency_ms")
+  deliveredAt     DateTime?            @map("delivered_at")
+  createdAt       DateTime             @default(now()) @map("created_at")
+
+  webhook   Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([status, nextRetryAt])
+  @@map("webhook_deliveries")
+}
