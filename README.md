@@ -4,6 +4,12 @@
 
 SmartRoute AI is a self-hosted API gateway that sits in front of your LLM providers (OpenAI, Anthropic, Google Gemini, Cohere, Mistral, Ollama) and adds intelligent routing, semantic caching, budget management, rate limiting, circuit breaking, and full observability — all in one stack.
 
+## Links
+
+- **Portfolio**: https://portfolio-website-master-wxeo.vercel.app/
+- **SmartSpidy** (related RAG product): https://smartspidy.smartbrew.in/
+- **This repo**: https://github.com/Ayush701-code-zm/LLM-Gatway
+
 ---
 
 ## Architecture Overview
